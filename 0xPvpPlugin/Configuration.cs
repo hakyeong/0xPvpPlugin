@@ -52,12 +52,8 @@ public class Configuration : IPluginConfiguration
     public void Initialize(DalamudPluginInterface pluginInterface)
     {
         this.pluginInterface = pluginInterface;
-    }
 
-    public void Init(Plugin plugin, DalamudPluginInterface pluginInterface)
-    {
-        this.plugin = plugin;
-        this.pluginInterface = pluginInterface;
+        Plugin.SetSpeed(Dspeed * speedOffset);
     }
 
     public bool DrawConfigUI()

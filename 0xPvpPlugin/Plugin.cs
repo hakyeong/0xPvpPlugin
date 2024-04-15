@@ -246,7 +246,7 @@ namespace OPP
 
         private void OnCommand(string command, string args)
         {
-            if (command == "/0x" && args == "settings")
+            if (command == "/0x" && (args == "settings" || args == ""))
             {
                 drawConfigWindow = !drawConfigWindow;
             }
