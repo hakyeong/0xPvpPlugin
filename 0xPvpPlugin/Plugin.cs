@@ -32,6 +32,7 @@ using Dalamud.Plugin.Services;
 using Dalamud.Utility.Signatures;
 using FFXIVClientStructs.Interop;
 using Lumina.Excel.GeneratedSheets2;
+using Dalamud;
 
 namespace OPP
 {
@@ -54,8 +55,9 @@ namespace OPP
         //internal PluginAddressResolver Address{get; set; } = null!;
         [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
         internal static ActionManager ActionManager { get; private set; }
-        [PluginService]
-        internal static IPluginLog pluginLog { get; private set; }
+        [PluginService] internal static IPluginLog pluginLog { get; private set; }
+
+        [PluginService] public static ISigScanner SigScanner { get; private set; } = null!;
 
         DateTime LastSelectTime;
 
@@ -112,6 +114,7 @@ namespace OPP
             Framework.Update += this.OnFrameworkUpdate;
             this.PluginInterface.UiBuilder.Draw += DrawUI;
             this.PluginInterface.UiBuilder.OpenConfigUi += OnOpenConfig;
+            this.PluginInterface.UiBuilder.OpenMainUi += OnOpenConfig;
         }
 
 
@@ -125,12 +128,12 @@ namespace OPP
                     if (clientState.LocalPlayer.ClassJob.Id == 30)
                     {
 
-                        if (actionID == 29513)  //缩地不受三印影响
+                        if (Configuration.TD && actionID == 29513)  //缩地不受三印影响
                         {
                             return actionID;
                         }
 
-                        if (clientState.LocalPlayer != null && actionID == 29507 && HasEffect(sybuff, clientState.LocalPlayer))  //防止重复点三印点出命水
+                        if (Configuration.MS && clientState.LocalPlayer != null && actionID == 29507 && HasEffect(sybuff, clientState.LocalPlayer))  //防止重复点三印点出命水
                         {
                             return 29657;
                         }
@@ -142,17 +145,6 @@ namespace OPP
                             {
                                 return 29657;
                             }
-                            //else if (HasEffect(dtbuff, actor))
-                            //{
-                            //    if (actionID == 29515 || actionID == 29506 || actionID == 29054 || actionID == 29054 || actionID == 29055 || actionID == 29056 || actionID == 29057 || actionID == 29711)
-                            //    {
-                            //        return OriginalHook(actionID);
-                            //    }
-                            //    else
-                            //    {
-                            //        return 29657;
-                            //    }
-                            //}
                             else
                             {
                                 return OriginalHook(actionID);
@@ -260,7 +252,7 @@ namespace OPP
             }
             if (command == "/0x" && args == "autoON")
             {
-                chatGui.Print("———AUTO ON———");
+                chatGui.Print("[0x]AUTO:ON");
                 Configuration.AutoSelect = true;
 
                 //TargetManaget.Target = null;
@@ -271,28 +263,48 @@ namespace OPP
             }
             if (command == "/0x" && args == "autoOFF")
             {
-                chatGui.Print("———AUTO OFF———");
+                chatGui.Print("[0x]AUTO:OFF");
                 Configuration.AutoSelect = false;
             }
             if (command == "/0x" && args == "20")
             {
-                chatGui.Print("——Distance: 20——");
+                chatGui.Print("[0x]Distance: 20");
                 Configuration.SelectDistance = 20;
             }
             if (command == "/0x" && args == "25")
             {
-                chatGui.Print("——Distance: 25——");
+                chatGui.Print("[0x]Distance: 25");
                 Configuration.SelectDistance = 25;
             }
             if (command == "/0x" && args == "SLBXON")
             {
-                chatGui.Print("——SLBX: ON——");
+                chatGui.Print("[0x]SLBX: ON");
                 Configuration.SLBX = true;
             }
             if (command == "/0x" && args == "SLBXOFF")
             {
-                chatGui.Print("——SLBX: OFF——");
+                chatGui.Print("[0x]SLBX: OFF");
                 Configuration.SLBX = false;
+            }
+            if (command == "/0x" && args == "down")
+            {
+                chatGui.Print("[0x]down: " + Configuration.downDistance + "m");
+                if (clientState.LocalPlayer != null)
+                {
+                    var pos = clientState.LocalPlayer.Position;
+                    var address = clientState.LocalPlayer.Address;
+                    SafeMemory.Write(address + 180, pos.Y - Configuration.downDistance);
+                }
+            }
+            if (command == "/0x" && args == "up")
+            {
+                chatGui.Print("[0x]up: " + Configuration.upDistance + "m");
+                if (clientState.LocalPlayer != null)
+                {
+                    var pos = clientState.LocalPlayer.Position;
+                    var address = clientState.LocalPlayer.Address;
+                    SafeMemory.Write(address + 180, pos.Y + Configuration.upDistance);
+                }
             }
         }
         private void OnFrameworkUpdate(IFramework framework)
@@ -397,17 +409,28 @@ namespace OPP
                 TargetManaget.Target = selectActor;
             }
         }
-            private void DrawUI()
+
+        public static void SetSpeed(float speedBase)
         {
-            //this.WindowSystem.Draw();
+            SigScanner.TryScanText("f3 ?? ?? ?? ?? ?? ?? ?? e8 ?? ?? ?? ?? 48 ?? ?? ?? ?? ?? ?? 0f ?? ?? e8 ?? ?? ?? ?? f3 ?? ?? ?? ?? ?? ?? ?? f3 ?? ?? ?? ?? ?? ?? ?? f3 ?? ?? ?? f3", out var address);
+            address = address + 4 + Marshal.ReadInt32(address + 4) + 4;
+            SafeMemory.Write(address + 20, speedBase);
+            SetMoveControlData(speedBase);
+        }
+
+        private unsafe static void SetMoveControlData(float speed)
+        {
+            SafeMemory.Write(((delegate* unmanaged[Stdcall]<byte, nint>)SigScanner.ScanText("E8 ?? ?? ?? ?? 48 ?? ?? 74 ?? 83 ?? ?? 75 ?? 0F ?? ?? ?? 66"))(1) + 8, speed);
+        }
+
+        private void DrawUI()
+        {
             drawConfigWindow = drawConfigWindow && Configuration.DrawConfigUI();
         }
 
         public void OnOpenConfig()
         {
-            drawConfigWindow = true;
-            //WindowSystem.GetWindow("NKP设置").IsOpen = true;
-            //gui.IsOpen = true;
+            drawConfigWindow = !drawConfigWindow;
         }
     }
 }
