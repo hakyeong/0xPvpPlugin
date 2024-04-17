@@ -34,6 +34,8 @@ public class Configuration : IPluginConfiguration
     public int upDistance = 0;
     public int downDistance = 0;
 
+    public int downDistanceAll = 0;
+
     public bool SLBX = false;
     public bool MS = true;
     public bool TD = true;
@@ -119,7 +121,17 @@ public class Configuration : IPluginConfiguration
                 var pos = Plugin.clientState.LocalPlayer.Position;
                 var address = Plugin.clientState.LocalPlayer.Address;
                 SafeMemory.Write(address + 180, pos.Y - downDistance);
+
+                downDistanceAll += downDistance;
             }
+        }
+        ImGui.SameLine();
+        if (ImGui.Button("回到地面"))
+        {
+            var pos = Plugin.clientState.LocalPlayer.Position;
+            var address = Plugin.clientState.LocalPlayer.Address;
+            SafeMemory.Write(address + 180, pos.Y + downDistanceAll);
+            downDistanceAll = 0;
         }
 
         ImGui.SetNextItemWidth(100);
