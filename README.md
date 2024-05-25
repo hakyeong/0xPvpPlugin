@@ -14,8 +14,6 @@ https://raw.githubusercontent.com/c98cmka/MyDalamudPlugins/main/pluginmaster.jso
 
 - <h4>白魔自动变猪</h4>
 
-- <h4>武士突进止步不会进入连击状态（能连续放三次冰雪）、可选自动释放LB、可调整LB释放人数阈值</h4>
-
 - <h4>更改人物坐标</h4>
 
 - <h4>更改移速</h4>
