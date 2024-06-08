@@ -1,6 +1,6 @@
 <h2>FF14 战场小玩具</h2>
 
-<h3>安装</h3>
+<h3>安装 (别下dev版了，用库罢)</h3>
 
 ```
 https://raw.githubusercontent.com/c98cmka/MyDalamudPlugins/main/pluginmaster.json
