@@ -19,6 +19,6 @@ https://raw.githubusercontent.com/c98cmka/MyDalamudPlugins/main/pluginmaster.jso
 - <h4>更改移速</h4>
 #
 *NEW*
-- <h4>防击退（无视DK马桶等强制位移，PVE也可用（大概））</h4>
+- <h4>防击退（无视DK马桶等强制位移，PVE也可用）</h4>
 
 - <h4>整合FrontlineRadar<h4>
