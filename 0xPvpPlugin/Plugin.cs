@@ -144,7 +144,7 @@ namespace OPP
 
             actorKnockAdress = Scanner.ScanText("48 8B C4 48 89 70 ?? 57 48 81 EC ?? ?? ?? ?? 0F 29 70 ?? 0F 28 C1");
             knockHook = gameInteropProvider.HookFromAddress<knockDelegate>(actorKnockAdress, knockDetour);
-            //knockHook?.Enable();
+            knockHook?.Enable();
 
 
             Framework.Update += this.OnFrameworkUpdate;
@@ -155,7 +155,7 @@ namespace OPP
 
         public void Dispose()
         {
-            //knockHook?.Dispose();
+            knockHook?.Dispose();
 
             getIconHook?.Dispose();
             returnHook?.Dispose();
