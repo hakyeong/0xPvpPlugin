@@ -4,7 +4,6 @@ using Dalamud.Plugin;
 using System.IO;
 using System.Reflection;
 using Dalamud.Interface.Windowing;
-using OPP.Windows;
 using Dalamud.Game.ClientState.Objects.SubKinds;
 using System.Runtime.InteropServices;
 using System;
@@ -33,6 +32,13 @@ using Dalamud.Utility.Signatures;
 using FFXIVClientStructs.Interop;
 using Lumina.Excel.GeneratedSheets2;
 using Dalamud;
+using FFXIVClientStructs.FFXIV.Client.Game.UI;
+using Dalamud.Game.ClientState.Conditions;
+using OPP.Windows;
+using System.Net;
+using System.Reflection.Metadata;
+using OPP.fr;
+
 
 namespace OPP
 {
@@ -56,10 +62,15 @@ namespace OPP
         [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
         internal static ActionManager ActionManager { get; private set; }
         [PluginService] internal static IPluginLog pluginLog { get; private set; }
-
         [PluginService] public static ISigScanner SigScanner { get; private set; } = null!;
+        [PluginService] public static ICondition Condition { get; private set; } = null!;
+        [PluginService] internal static IGameGui gui { get; private set; }
+        internal UIBuilder Ui;
+
+        internal static Queue<(ulong id, DateTime time)> AttackedTargets { get; } = new(48);
 
         DateTime LastSelectTime;
+        DateTime LastXDTZTime;
 
         uint xdtz = (uint)29515; //星遁天诛
 
@@ -72,18 +83,33 @@ namespace OPP
         ushort sybuff = (ushort)1317; //三印
         ushort dtbuff = (ushort)1240; //必杀剑·地天
 
+        public static double totalTime = 0;
+        public static double totalPlayer = 0;
+        public static bool hasUseXDTZ = false;
+
         private IntPtr actionManager = IntPtr.Zero;
         private delegate uint GetIconDelegate(IntPtr actionManager, uint actionID);
         //private readonly Hook<GetIconDelegate> getIconHook;
 
-        [Signature("E8 ?? ?? ?? ?? 8B F8 3B DF", DetourName = nameof(GetIconDelegate))]
         private Hook<GetIconDelegate> getIconHook { get; init; }
+
+        private delegate byte ReturnDelegate(nint a1);
+
+        private static Hook<ReturnDelegate>? returnHook;
 
         #region 更新地址
         private IntPtr GetAdjustedActionId;
+        private IntPtr OnReturn;
+
+        private IntPtr pattern_main;
+        private IntPtr pattern_actor_move;
+        private IntPtr actorKnockAdress;
+        private delegate byte knockDelegate(IntPtr actor_ptr, uint angle, uint dis, uint knock_time, uint a5, uint a6);
+        private static Hook<knockDelegate>? knockHook;
+
+
         private CanAttackDelegate CanAttack;
         private delegate int CanAttackDelegate(int arg, IntPtr objectAddress);
-        //private const int CanAttackOffset = 0x802840;//Struct121_IntPtr_17
         #endregion
 
         public Plugin(
@@ -92,24 +118,34 @@ namespace OPP
         {
             this.PluginInterface = pluginInterface;
             this.CommandManager = commandManager;
-            //chatGui.Print("0xPvpPlugin Initialize.");
             this.Configuration = this.PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
             this.Configuration.Initialize(this.PluginInterface);
             this.CommandManager.AddHandler("/0x", new CommandInfo(OnCommand)
             {
-                HelpMessage = "/0x settings"
-            }) ;
+                HelpMessage = "/0x setting"
+            });
 
-            //CanAttack = Marshal.GetDelegateForFunctionPointer<CanAttackDelegate>(Process.GetCurrentProcess().MainModule.BaseAddress + CanAttackOffset);
+            Ui = new UIBuilder(this, pluginInterface, Configuration);
+
             CanAttack = Marshal.GetDelegateForFunctionPointer<CanAttackDelegate>(Scanner.ScanText("48 89 5C 24 ?? 57 48 83 EC 20 48 8B DA 8B F9 E8 ?? ?? ?? ?? 4C 8B C3"));
 
             GetAdjustedActionId = Scanner.ScanText("E8 ?? ?? ?? ?? 8B F8 3B DF");
-
-            if(gameInteropProvider is null) pluginLog.Debug(Convert.ToString("1234"));
-            pluginLog.Debug(Convert.ToString(gameInteropProvider));
+            OnReturn = Scanner.ScanText("48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC ?? 48 8B 3D ?? ?? ?? ?? 48 8B D9 48 8D 0D");
 
             getIconHook = gameInteropProvider.HookFromAddress<GetIconDelegate>(GetAdjustedActionId, GetIconDetour);
             getIconHook.Enable();
+
+            returnHook = gameInteropProvider.HookFromAddress<ReturnDelegate>(OnReturn, ReturnDetour);
+            returnHook?.Enable();
+
+
+            //pattern_main = Scanner.ScanText("f3 0f ?? ?? ?? ?? ?? ?? eb ?? 48 8b ?? ?? ?? ?? ?? e8 ?? ?? ?? ?? 48 85");
+            //pattern_actor_move = Scanner.ScanText("40 53 48 83 EC ?? F3 0F 11 89 ?? ?? ?? ?? 48 8B D9 F3 0F 11 91 ?? ?? ?? ??");
+
+            actorKnockAdress = Scanner.ScanText("48 8B C4 48 89 70 ?? 57 48 81 EC ?? ?? ?? ?? 0F 29 70 ?? 0F 28 C1");
+            knockHook = gameInteropProvider.HookFromAddress<knockDelegate>(actorKnockAdress, knockDetour);
+            //knockHook?.Enable();
+
 
             Framework.Update += this.OnFrameworkUpdate;
             this.PluginInterface.UiBuilder.Draw += DrawUI;
@@ -117,11 +153,34 @@ namespace OPP
             this.PluginInterface.UiBuilder.OpenMainUi += OnOpenConfig;
         }
 
+        public void Dispose()
+        {
+            //knockHook?.Dispose();
 
-        
+            getIconHook?.Dispose();
+            returnHook?.Dispose();
+            Framework.Update -= this.OnFrameworkUpdate;
+            this.WindowSystem.RemoveAllWindows();
+            this.CommandManager.RemoveHandler(CommandName);
+        }
+
+        private byte knockDetour(IntPtr actor_ptr, uint angle, uint dis, uint knock_time, uint a5, uint a6) {
+            if (Configuration.antiKnockback)
+            {
+                return 0;
+            }
+            else 
+            {
+                return knockHook.Original(actor_ptr, angle, dis, knock_time, a5, a6);
+            }
+        }
+
+
         internal uint OriginalHook(uint actionID) => getIconHook.Original(actionManager, actionID);
-        private unsafe uint GetIconDetour(IntPtr actionManager, uint actionID) {
-            try {
+        private unsafe uint GetIconDetour(IntPtr actionManager, uint actionID)
+        {
+            try
+            {
                 if (clientState.IsPvP && clientState.LocalPlayer != null)
                 {
                     //忍者
@@ -166,12 +225,18 @@ namespace OPP
                         {
                             return 29523;
                         }
-                        else {
+                        else if (totalPlayer <= 0 && actionID == 29537)
+                        { //斩铁剑
+                            return 29657;
+                        }
+                        else
+                        {
                             return OriginalHook(actionID);
                         }
                     }
                     //其他职业
-                    else {
+                    else
+                    {
                         return OriginalHook(actionID);
                     }
                 }
@@ -180,19 +245,25 @@ namespace OPP
                     return OriginalHook(actionID);
                 }
             }
-            catch(Exception e)
+            catch (Exception e)
             {
                 if (actionID == 29515)
                 {
                     return 29657;
                 }
-                else { 
+                else
+                {
                     return OriginalHook(actionID);
                 }
             }
         }
 
-
+        private static byte ReturnDetour(nint a1)
+        {
+            //if (clientState.IsPvP)
+                return returnHook.Original(a1);
+            //return 1;
+        }
 
         public bool HasEffect(ushort effectID, GameObject? obj) => GetStatus(effectID, obj, null) is not null;
 
@@ -204,7 +275,7 @@ namespace OPP
             uint InvalidObjectID = 0xE000_0000;
             //var key = (statusID, obj?.ObjectId, sourceID);
 
-            BattleChara charaTemp = (BattleChara) obj;
+            BattleChara charaTemp = (BattleChara)obj;
 
             foreach (Dalamud.Game.ClientState.Statuses.Status? status in charaTemp.StatusList)
             {
@@ -223,10 +294,6 @@ namespace OPP
             //chatGui.Print(charaTemp.StatusList.Count().ToString());
             foreach (Dalamud.Game.ClientState.Statuses.Status status in charaTemp.StatusList)
             {
-                //chatGui.Print(status.StatusId.ToString());
-                //chatGui.Print(status.SourceId.ToString());
-                //chatGui.Print(clientState.LocalPlayer.ObjectId.ToString());
-                //chatGui.Print(status.SourceObject?.OwnerId.ToString());
                 if (status.StatusId == statusID && (status.SourceId == clientState.LocalPlayer.ObjectId || status.SourceObject?.OwnerId == clientState.LocalPlayer.ObjectId))
                 {
                     return status;
@@ -235,88 +302,61 @@ namespace OPP
             return null;
         }
 
-        public void Dispose()
-        {
-            getIconHook?.Dispose();
-            this.CommandManager.RemoveHandler("/0x");
-            Framework.Update -= this.OnFrameworkUpdate;
-            this.WindowSystem.RemoveAllWindows();
-            this.CommandManager.RemoveHandler(CommandName);
-        }
-
         private void OnCommand(string command, string args)
         {
             if (command == "/0x" && (args == "settings" || args == ""))
             {
                 drawConfigWindow = !drawConfigWindow;
             }
-            if (command == "/0x" && args == "autoON")
+            if (command == "/0x" && (args == "TargetOnce")) //DK跳斩
             {
-                chatGui.Print("[0x]AUTO:ON");
-                Configuration.AutoSelect = true;
-
-                //TargetManaget.Target = null;
-
-                //var distance2D = Math.Sqrt(Math.Pow(clientState.LocalPlayer.TargetObject.YalmDistanceX, 2) + Math.Pow(clientState.LocalPlayer.TargetObject.YalmDistanceZ, 2)) - 6;
-                //distance2D = Math.Sqrt(Math.Pow(clientState.LocalPlayer.Position.X - clientState.LocalPlayer.TargetObject.Position.X, 2) + Math.Pow(clientState.LocalPlayer.Position.Y - clientState.LocalPlayer.TargetObject.Position.Y, 2)) - 1;
-                //pluginLog.Error(distance2D.ToString());
-            }
-            if (command == "/0x" && args == "autoOFF")
+                SelectDenceEnemyOnce();
+            }            
+            if (command == "/0x" && (args == "Select")) //选人
             {
-                chatGui.Print("[0x]AUTO:OFF");
-                Configuration.AutoSelect = false;
-            }
-            if (command == "/0x" && args == "20")
-            {
-                chatGui.Print("[0x]Distance: 20");
-                Configuration.SelectDistance = 20;
-            }
-            if (command == "/0x" && args == "25")
-            {
-                chatGui.Print("[0x]Distance: 25");
-                Configuration.SelectDistance = 25;
-            }
-            if (command == "/0x" && args == "SLBXON")
-            {
-                chatGui.Print("[0x]SLBX: ON");
-                Configuration.SLBX = true;
-            }
-            if (command == "/0x" && args == "SLBXOFF")
-            {
-                chatGui.Print("[0x]SLBX: OFF");
-                Configuration.SLBX = false;
-            }
-            if (command == "/0x" && args == "down")
-            {
-                chatGui.Print("[0x]down: " + Configuration.downDistance + "m");
-                if (clientState.LocalPlayer != null)
-                {
-                    var pos = clientState.LocalPlayer.Position;
-                    var address = clientState.LocalPlayer.Address;
-                    SafeMemory.Write(address + 180, pos.Y - Configuration.downDistance);
-                }
-            }
-            if (command == "/0x" && args == "up")
-            {
-                chatGui.Print("[0x]up: " + Configuration.upDistance + "m");
-                if (clientState.LocalPlayer != null)
-                {
-                    var pos = clientState.LocalPlayer.Position;
-                    var address = clientState.LocalPlayer.Address;
-                    SafeMemory.Write(address + 180, pos.Y + Configuration.upDistance);
-                }
+                SelectDenceEnemyOnceForAll();
             }
         }
         private void OnFrameworkUpdate(IFramework framework)
         {
             try
             {
-                if (clientState.LocalPlayer != null && clientState.IsPvP && clientState.LocalPlayer.CurrentHp != 0 && Configuration.AutoSelect)
+                if (clientState.LocalPlayer != null && clientState.IsPvP && clientState.LocalPlayer.CurrentHp != 0)
                 {
-                    this.ReFreshEnermyActors_And_AutoSelect();
+                    if (clientState.LocalPlayer.ClassJob.Id == 30 && Configuration.AutoSelect) //忍者
+                    {
+                        if (Configuration.Ninoption)
+                        {
+                            if (isNINLBReady())
+                            {
+                                this.ReFreshEnermyActors_And_AutoSelect();
+                            }
+                        }
+                        else
+                        {
+                            this.ReFreshEnermyActors_And_AutoSelect();
+                        }
+                    }
+                    else if (clientState.LocalPlayer.ClassJob.Id == 34 && Configuration.AutoSelectSAM && isSAMLBReady()) //武士
+                    {
+                        this.ReFreshDebuffedActors_And_AutoSelect();
+                    }
+                    else if (clientState.LocalPlayer.ClassJob.Id == 24 && Configuration.AutoBianZhu) //白魔
+                    {
+                        this.ReFreshNearestSAM_And_AutoSelect();
+                    }
+                    else //选人堆
+                    {
+                        this.ReFreshDenseActors_And_AutoSelect();
+                    }
                 }
-            }catch(Exception ex) { }
+            }
+            catch (Exception ex) { }
         }
+
+
+
+
 
         private void ReFreshEnermyActors_And_AutoSelect()
         {
@@ -324,6 +364,7 @@ namespace OPP
             {
                 return;
             }
+            DateTime beforDT = System.DateTime.Now;
             lock (Configuration.EnermyActors)
             {
                 Configuration.EnermyActors.Clear();
@@ -340,7 +381,10 @@ namespace OPP
                         {
                             PlayerCharacter rcTemp = obj as PlayerCharacter;
                             //19 骑士   32 DK
-                            if (rcTemp != null && rcTemp.ClassJob.Id != 19 && rcTemp.ClassJob.Id != 32)
+                            if (rcTemp != null
+                                //&& rcTemp.ClassJob.Id != 19 && rcTemp.ClassJob.Id != 32
+                                && rcTemp.StatusList.Where(x => x.StatusId == 1301 || x.StatusId == 1302 || x.StatusId == 3039).Count() == 0
+                                && CameraHelper.CanSee(clientState.LocalPlayer.Position, rcTemp.Position))
                             {
                                 Configuration.EnermyActors.Add(rcTemp);
                             }
@@ -358,6 +402,24 @@ namespace OPP
                 if (LastSelectTime == null || (now - LastSelectTime).TotalMilliseconds > Configuration.SelectInterval)
                 {
                     SelectEnermyOnce();
+                    DateTime afterDT = DateTime.Now;
+                    TimeSpan ts = afterDT.Subtract(beforDT);
+                    if (totalTime < ts.TotalMilliseconds)
+                    {
+                        totalTime = ts.TotalMilliseconds;
+                    }
+                    if (Configuration.AutoSelectInterval)
+                    {
+                        if (Configuration.SelectInterval < (int)Math.Ceiling(totalTime)) 
+                        {
+                            Configuration.SelectInterval = (int)Math.Ceiling(totalTime);
+                            if (Configuration.SelectInterval > 100)
+                            {
+                                Configuration.SelectInterval = 100;
+                            }
+                            Configuration.Save();
+                        }
+                    }
                     LastSelectTime = now;
                 }
             }
@@ -375,7 +437,7 @@ namespace OPP
                 if (clientState.LocalPlayer.TargetObject != null && clientState.LocalPlayer.TargetObject is PlayerCharacter)
                 {
                     PlayerCharacter temp = clientState.LocalPlayer.TargetObject as PlayerCharacter;
-                    if (temp.CurrentHp != 0 && temp.ClassJob.Id != 19 && temp.ClassJob.Id != 32)
+                    if (temp.CurrentHp != 0)
                     {
                         Configuration.EnermyActors.Insert(0, temp);
                     }
@@ -385,14 +447,9 @@ namespace OPP
                 {
                     try
                     {
-                        //pluginLog.Error(Convert.ToString(actor.Name));
-
-                        //var distance2D = Math.Sqrt(Math.Pow(clientState.LocalPlayer.Position.X - actor.Position.X, 2) + Math.Pow(clientState.LocalPlayer.Position.Y - actor.Position.Y, 2)) - 1;
-                        var distance2D = Math.Sqrt(Math.Pow(actor.YalmDistanceX, 2) + Math.Pow(actor.YalmDistanceZ, 2)) - 6;
-                        //var distance2D = 30;
-
-                        //if (distance2D <= Configuration.SelectDistance && actor.CurrentHp != 0 && (selectActor == null || actor.CurrentHp < selectActor.CurrentHp))
-                        if (distance2D <= Configuration.SelectDistance && actor.CurrentHp != 0 && actor.CurrentHp <= ((actor.MaxHp / 2)) && !HasEffect(bhbuff, actor))
+                        //var distance2D = Math.Sqrt(Math.Pow(actor.YalmDistanceX, 2) + Math.Pow(actor.YalmDistanceZ, 2)) - 6;
+                        var distance2D = Vector3.Distance(clientState.LocalPlayer?.Position ?? Vector3.Zero, actor.Position);
+                        if (distance2D <= 20 && actor.CurrentHp != 0 && actor.CurrentHp < (actor.MaxHp / 2))
                         {
                             selectActor = actor;
                             break;
@@ -407,7 +464,427 @@ namespace OPP
             if (selectActor != null)
             {
                 TargetManaget.Target = selectActor;
+                PlayerCharacter tar = clientState.LocalPlayer.TargetObject as PlayerCharacter;
+                if (TargetManaget.Target != null && Configuration.AutoXDTZ && tar != null && tar.StatusList.Where(x => x.StatusId == 1301 || x.StatusId == 1302 || x.StatusId == 3039).Count() == 0)
+                {
+                    XDTZ(selectActor.ObjectId);
+                }
             }
+        }
+
+
+
+
+
+        private void ReFreshDebuffedActors_And_AutoSelect()
+        {
+            if (clientState.LocalPlayer == null)
+            {
+                return;
+            }
+            DateTime beforDT = System.DateTime.Now;
+            lock (Configuration.BuffedActors)
+            {
+                Configuration.BuffedActors.Clear();
+                if (objectTable == null)
+                {
+                    return;
+                }
+                foreach (var obj in objectTable)
+                {
+                    try
+                    {
+                        if (obj != null && (obj.ObjectId != clientState.LocalPlayer.ObjectId) & obj.Address.ToInt64() != 0 && CanAttack(142, obj.Address) == 1)
+                        {
+                            PlayerCharacter rcTemp = obj as PlayerCharacter;
+                            if (rcTemp != null
+                                && (rcTemp.ShieldPercentage == 0 || (rcTemp.ShieldPercentage > 0 && rcTemp.ShieldPercentage * 0.01 * rcTemp.MaxHp + rcTemp.CurrentHp < rcTemp.MaxHp - 30000))
+                                && CameraHelper.CanSee(clientState.LocalPlayer.Position, rcTemp.Position)
+                                && rcTemp.StatusList.Where(x => x.StatusId == 1301 || x.StatusId == 1302 || x.StatusId == 3039).Count() == 0  //保护/神圣领域/DKLB
+                                && rcTemp.StatusList.Where(x => x.StatusId == 3202 && x.SourceId == clientState.LocalPlayer.ObjectId).Count() >= 1)
+                            {
+                                Configuration.BuffedActors.Add(rcTemp);
+                            }
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        continue;
+                    }
+                }
+            }
+            if (true)
+            {
+                DateTime now = DateTime.Now;
+                if (LastSelectTime == null || (now - LastSelectTime).TotalMilliseconds > Configuration.SelectInterval)
+                {
+                    SelectBuffedEnermyOnce();
+                    DateTime afterDT = System.DateTime.Now;
+                    TimeSpan ts = afterDT.Subtract(beforDT);
+                    if (totalTime < ts.TotalMilliseconds)
+                    {
+                        totalTime = ts.TotalMilliseconds;
+                    }
+                    if (Configuration.AutoSelectInterval)
+                    {
+                        if (Configuration.SelectInterval < (int)Math.Ceiling(totalTime))
+                        {
+                            Configuration.SelectInterval = (int)Math.Ceiling(totalTime);
+                            if (Configuration.SelectInterval > 100)
+                            {
+                                Configuration.SelectInterval = 100;
+                            }
+                            Configuration.Save();
+                        }
+                    }
+                    LastSelectTime = now;
+                }
+            }
+        }
+
+        private void SelectBuffedEnermyOnce()
+        {
+            if (clientState.LocalPlayer == null || Configuration.BuffedActors == null)
+            {
+                totalPlayer = 0;
+                return;
+            }
+            PlayerCharacter selectActor = null;
+
+            var maxNum = -1;
+            PlayerCharacter maxNumActor = null;
+
+            foreach (PlayerCharacter actor in Configuration.BuffedActors)
+            {
+                var num = 0;
+                var targetDistance = Vector3.Distance(clientState.LocalPlayer?.Position ?? Vector3.Zero, actor.Position);
+                if (targetDistance > 21.7)
+                {
+                    continue;
+                }
+                foreach (PlayerCharacter actor2 in Configuration.BuffedActors)
+                {
+                    var distance = Vector3.Distance(actor.Position, actor2.Position);
+                    if (distance < 5)
+                    {
+                        num++;
+                    }
+                }
+                if (maxNum < num)
+                {
+                    maxNum = num;
+                    maxNumActor = actor;
+                }
+            }
+
+            if (maxNumActor != null)
+            {
+                //TargetManaget.Target = maxNumActor;
+                totalPlayer = maxNum;
+                if (maxNum >= Configuration.AutoZhanNum)
+                {
+                    Zhan(maxNumActor.ObjectId);
+                }
+            }
+            else
+            {
+                totalPlayer = 0;
+            }
+        }
+
+
+
+
+
+        private void ReFreshDenseActors_And_AutoSelect()
+        {
+            if (clientState.LocalPlayer == null)
+            {
+                return;
+            }
+            lock (Configuration.DenseActors)
+            {
+                Configuration.DenseActors.Clear();
+                if (objectTable == null)
+                {
+                    return;
+                }
+                foreach (var obj in objectTable)
+                {
+                    try
+                    {
+                        if (obj != null && (obj.ObjectId != clientState.LocalPlayer.ObjectId) & obj.Address.ToInt64() != 0 && CanAttack(142, obj.Address) == 1)
+                        {
+                            PlayerCharacter rcTemp = obj as PlayerCharacter;
+                            if (rcTemp != null)
+                            {
+                                var distance = Vector3.Distance(clientState.LocalPlayer?.Position ?? Vector3.Zero, rcTemp.Position);
+                                if (rcTemp.CurrentHp > 0 && distance <= 30)
+                                {
+                                    Configuration.DenseActors.Add(rcTemp);
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        continue;
+                    }
+                }
+            }
+        }
+        public void SelectDenceEnemyOnce()
+        {
+            if (!clientState.IsPvP) return;
+            var maxNum = -1;
+            PlayerCharacter maxNumActor = null;
+            foreach (var actor in Configuration.DenseActors)
+            {
+                var num = 0;
+                var targetDistance = Vector3.Distance(clientState.LocalPlayer?.Position ?? Vector3.Zero, actor.Position);
+                if (targetDistance > 21.7)
+                {
+                    continue;
+                }
+                foreach (PlayerCharacter actor2 in Configuration.DenseActors)
+                {
+                    var distance = Vector3.Distance(actor.Position, actor2.Position);
+                    if (distance < 11)
+                    {
+                        num++;
+                    }
+                }
+                if (maxNum < num)
+                {
+                    maxNum = num;
+                    maxNumActor = actor;
+                }
+            }
+            if (maxNumActor != null)
+            {
+                TargetManaget.Target = maxNumActor;
+                if (Configuration.AutoTiaoZhan)
+                {
+                    TiaoZhan(maxNumActor.ObjectId);
+                }
+            }
+        }
+        
+        public void SelectDenceEnemyOnceForAll()
+        {
+            if (!clientState.IsPvP) return;
+            var maxNum = -1;
+            PlayerCharacter maxNumActor = null;
+            foreach (var actor in Configuration.DenseActors)
+            {
+                var num = 0;
+                var targetDistance = Vector3.Distance(clientState.LocalPlayer?.Position ?? Vector3.Zero, actor.Position);
+                if (targetDistance > Configuration.SelectDistance + 1)
+                {
+                    continue;
+                }
+                foreach (PlayerCharacter actor2 in Configuration.DenseActors)
+                {
+                    var distance = Vector3.Distance(actor.Position, actor2.Position);
+                    if (distance < Configuration.SelectSkillRange + 1)
+                    {
+                        num++;
+                    }
+                }
+                if (maxNum < num)
+                {
+                    maxNum = num;
+                    maxNumActor = actor;
+                }
+            }
+            if (maxNumActor != null)
+            {
+                TargetManaget.Target = maxNumActor;
+            }
+        }
+        
+        
+        
+        
+        private void ReFreshNearestSAM_And_AutoSelect()
+        {
+            if (clientState.LocalPlayer == null)
+            {
+                return;
+            }
+            DateTime beforDT = System.DateTime.Now;
+            Configuration.NearestOBJ = null;
+            if (objectTable == null)
+            {
+                return;
+            }
+            foreach (var obj in objectTable)
+            {
+                try
+                {
+                    if (obj != null && (obj.ObjectId != clientState.LocalPlayer.ObjectId) & obj.Address.ToInt64() != 0 && CanAttack(142, obj.Address) == 1)
+                    {
+                        PlayerCharacter rcTemp = obj as PlayerCharacter;
+                        if (rcTemp != null)
+                        {
+                            var distance = Vector3.Distance(clientState.LocalPlayer?.Position ?? Vector3.Zero, rcTemp.Position);
+                                
+                            if (Configuration.AutoBianZhuSAM)
+                            {
+                                    
+                                if (rcTemp.CurrentHp > 0 && rcTemp.ClassJob.Id == 34 && distance <= 11.7 && //10m内活着的武士
+                                rcTemp.StatusList.Where(x => x.StatusId == 1240).Count() >= 1 && //有地天
+                                rcTemp.StatusList.Where(x => x.StatusId == 3054).Count() == 0) //无罩子
+                                {
+                                    Configuration.NearestOBJ = rcTemp;
+                                }
+                            }
+                            else if (Configuration.AutoBianZhuDRK) 
+                            {
+                                if (rcTemp.CurrentHp > 50000 && rcTemp.ClassJob.Id == 32 
+                                    && distance <= 10 && rcTemp.StatusList.Where(x => x.StatusId == 3039).Count() == 0) //10m内50000血以上没开无敌的DK
+                                {
+                                    Configuration.NearestOBJ = rcTemp;
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+            }
+            if (Configuration.NearestOBJ != null)
+            {
+                DateTime now = DateTime.Now;
+                if (LastSelectTime == null || (now - LastSelectTime).TotalMilliseconds > Configuration.SelectInterval)
+                {
+                    SelectNearestOBJOnce();
+                    DateTime afterDT = System.DateTime.Now;
+                    TimeSpan ts = afterDT.Subtract(beforDT);
+                    if (totalTime < ts.TotalMilliseconds)
+                    {
+                        totalTime = ts.TotalMilliseconds;
+                    }
+                    if (Configuration.AutoSelectInterval)
+                    {
+                        if (Configuration.SelectInterval < (int)Math.Ceiling(totalTime))
+                        {
+                            Configuration.SelectInterval = (int)Math.Ceiling(totalTime);
+                            if (Configuration.SelectInterval > 100)
+                            {
+                                Configuration.SelectInterval = 100;
+                            }
+                            Configuration.Save();
+                        }
+                    }
+                    LastSelectTime = now;
+                }
+            }
+        }
+        public void SelectNearestOBJOnce()
+        {
+            if (Configuration.NearestOBJ != null)
+            {
+                //TargetManaget.Target = Configuration.NearestOBJ;
+                if (Configuration.AutoBianZhuSAM)
+                {
+                    BianZhu(Configuration.NearestOBJ.ObjectId);
+                }
+            }
+        }
+
+
+
+
+
+        unsafe private void Zhan(uint ObjectId)
+        {
+            ActionManager.Instance()->UseAction(ActionType.Action, 29537, ObjectId); //斩铁剑
+        }
+
+        unsafe private void XDTZ(uint ObjectId)
+        {
+            if (hasUseXDTZ)
+            {
+                DateTime now = DateTime.Now;
+                if (LastXDTZTime == null || (now - LastXDTZTime).TotalMilliseconds > Configuration.AutoXDTZDelay + 2500)
+                {
+                    bool thisTime = ActionManager.Instance()->UseAction(ActionType.Action, 29515, ObjectId); //星遁天诛
+                    if (thisTime)
+                    {
+                        LastXDTZTime = now;
+                    }
+                }
+            }
+            else
+            {
+                hasUseXDTZ = ActionManager.Instance()->UseAction(ActionType.Action, 29515, ObjectId); //星遁天诛
+            }
+        }
+        unsafe static public void TiaoZhan(uint ObjectId)
+        {
+            ActionManager.Instance()->UseAction(ActionType.Action, 29092, ObjectId); //跳斩
+        }        
+        unsafe static public void BianZhu(uint ObjectId)
+        {
+            ActionManager.Instance()->UseAction(ActionType.Action, 29228, ObjectId); //变猪
+        }
+
+        unsafe public static bool isSAMLBReady()
+        {
+            var lb = LimitBreakController.Instance();
+            var lbNow = lb->CurrentValue;
+            var lbMax = lb->BarValue & 0xFFFF;
+            if (lbNow != lbMax)
+            {
+                Plugin.totalPlayer = 0;
+            }
+            return lbNow == lbMax;
+            //chatGui.Print(lbnow + "/" + lbMax);
+        }
+
+        unsafe public static bool isNINLBReady()
+        {
+            var lb = LimitBreakController.Instance();
+            var lbNow = lb->CurrentValue;
+            var lbMax = lb->BarValue & 0xFFFF;
+
+            bool hasNext = false;
+            foreach (var status in clientState.LocalPlayer.StatusList)
+            {
+                if (status.StatusId == 3192)
+                {
+                    hasNext = true;
+                    break;
+                }
+            }
+            return (lbNow == lbMax) || hasNext;
+        }
+
+        public float GetMapZoneCoordSize(ushort TerritoryType)
+        {
+            //EVERYTHING EXCEPT HEAVENSWARD HAS 41 COORDS, BUT FOR SOME REASON HW HAS 43, WHYYYYYY
+            if (TerritoryType is >= 397 and <= 402) return 43.1f;
+            return 41f;
+        }
+        public static float ConvertToMapCoordinate(float pos, float zoneMaxCoordSize)
+        {
+            return (float)Math.Floor(((zoneMaxCoordSize + 1.96) / 2 + (pos / 50)) * 100) / 100;
+        }
+
+        private float ConvertMapMarkerToMapCoordinate(float pos, float scale)
+        {
+            float num = scale / 100f;
+            var rawPosition = ((float)(pos - 1024.0) / num * 1000f);
+            return ConvertRawPositionToMapCoordinate(rawPosition, scale);
+        }
+
+        private float ConvertRawPositionToMapCoordinate(float pos, float scale)
+        {
+            float num = scale / 100f;
+            return (float)((pos / 1000f * num + 1024.0) / 2048.0 * 41.0 / num + 1.0);
         }
 
         public static void SetSpeed(float speedBase)
