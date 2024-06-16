@@ -579,7 +579,7 @@ namespace OPP
 
             if (maxNumActor != null)
             {
-                //TargetManaget.Target = maxNumActor;
+                TargetManaget.Target = maxNumActor;
                 totalPlayer = maxNum;
                 if (maxNum >= Configuration.AutoZhanNum)
                 {

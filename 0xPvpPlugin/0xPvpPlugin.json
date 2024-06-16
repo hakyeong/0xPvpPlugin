@@ -5,5 +5,6 @@
   "Description": "",
   "ApplicableVersion": "any",
   "DalamudApiLevel": 9,
-  "AcceptsFeedback": false
+  "AcceptsFeedback": false,
+  "IconUrl": "https://raw.githubusercontent.com/c98cmka/0xPvpPlugin/master/002914.png"
 }
